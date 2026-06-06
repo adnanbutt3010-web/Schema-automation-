@@ -1,0 +1,750 @@
+import { useState, useEffect, useCallback } from "react";
+
+// ─── Supabase Config ──────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://orwrpyfjqukdafgieubq.supabase.co";
+const SUPABASE_KEY = "sb_publishable_JscimtoBJb1IEz4YehSKZA_iMYEe45b";
+const HEADERS = {
+  "Content-Type": "application/json",
+  "apikey": SUPABASE_KEY,
+  "Authorization": `Bearer ${SUPABASE_KEY}`,
+  "Prefer": "return=representation",
+};
+
+// ─── Supabase Helpers ─────────────────────────────────────────────────────────
+async function sbSelect(table, filter = "") {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, { headers: HEADERS });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+async function sbInsert(table, data) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST", headers: HEADERS, body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+async function sbUpdate(table, filter, data) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+    method: "PATCH", headers: HEADERS, body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+async function sbDelete(table, filter) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+    method: "DELETE", headers: HEADERS,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return true;
+}
+async function sbUpsert(table, data) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST",
+    headers: { ...HEADERS, "Prefer": "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// ─── Create Table SQL (shown in setup) ───────────────────────────────────────
+const SETUP_SQL = `-- Run this in Supabase SQL Editor:
+create table if not exists schema_clients (
+  id text primary key,
+  name text not null,
+  url text,
+  created_at text,
+  global_enabled boolean default true,
+  schemas jsonb default '{}',
+  settings jsonb default '{}'
+);`;
+
+// ─── Default Data ─────────────────────────────────────────────────────────────
+const defaultSchemas = () => ({
+  article:       { id:"article",       label:"Article / Blog Post",   icon:"📝", enabled:true,  description:"Article schema — boosts rich snippets", fields:{ authorName:"", publisherName:"", publisherLogo:"" }},
+  breadcrumb:    { id:"breadcrumb",    label:"Breadcrumb Navigation", icon:"🧭", enabled:true,  description:"Breadcrumb trail in Google SERPs", fields:{}},
+  organization:  { id:"organization",  label:"Organization",          icon:"🌐", enabled:true,  description:"Brand + socials for Knowledge Panel", fields:{ orgName:"", website:"", socialProfiles:"" }},
+  website:       { id:"website",       label:"WebSite + Sitelinks",   icon:"🔍", enabled:true,  description:"Sitelinks search box in Google", fields:{ siteName:"", siteUrl:"" }},
+  review:        { id:"review",        label:"Review / Rating",       icon:"⭐", enabled:false, description:"Star ratings in search results", fields:{ ratingValue:"4.8", reviewCount:"120" }},
+  localBusiness: { id:"localBusiness", label:"Local Business",        icon:"🏢", enabled:false, description:"Maps, address, phone in SERPs", fields:{ businessName:"", phone:"", address:"", city:"", country:"PK" }},
+  product:       { id:"product",       label:"Product Schema",        icon:"🛍️", enabled:false, description:"Price, availability & ratings", fields:{ currency:"PKR" }},
+  faq:           { id:"faq",           label:"FAQ Schema",            icon:"❓", enabled:false, description:"FAQ rich snippets for Q&A sections", fields:{}},
+  howTo:         { id:"howTo",         label:"HowTo Schema",          icon:"📋", enabled:false, description:"Step-by-step rich results", fields:{}},
+  video:         { id:"video",         label:"VideoObject",           icon:"🎬", enabled:false, description:"Video rich results", fields:{}},
+  event:         { id:"event",         label:"Event Schema",          icon:"🎯", enabled:false, description:"Event listings with date & location", fields:{}},
+  person:        { id:"person",        label:"Person / Author",       icon:"👤", enabled:false, description:"Author bio E-E-A-T signals", fields:{ personName:"", jobTitle:"", sameAs:"" }},
+});
+const defaultSettings = () => ({
+  autoApply: true,
+  postTypes: { post:true, page:false, product:true },
+  excludedUrls: "",
+  debugMode: false,
+});
+const makeClient = (name, url) => ({
+  id: Date.now().toString(),
+  name,
+  url: url || "https://",
+  created_at: new Date().toLocaleDateString("en-PK"),
+  global_enabled: true,
+  schemas: defaultSchemas(),
+  settings: defaultSettings(),
+});
+
+// ─── Code Generator ───────────────────────────────────────────────────────────
+function generateCode(schemas) {
+  const enabled = Object.values(schemas).filter(s => s.enabled);
+  if (!enabled.length) return "// No schemas enabled.";
+  const parts = [];
+  enabled.forEach(s => {
+    if (s.id==="article") parts.push(`    {\n      "@type": "Article",\n      "headline": "{{POST_TITLE}}",\n      "description": "{{POST_EXCERPT}}",\n      "url": "{{POST_URL}}",\n      "datePublished": "{{POST_DATE}}",\n      "dateModified": "{{POST_MODIFIED}}",\n      "image": "{{FEATURED_IMAGE}}",\n      "author": {"@type":"Person","name":"${s.fields.authorName||"Author"}"},\n      "publisher": {"@type":"Organization","name":"${s.fields.publisherName||"Publisher"}","logo":{"@type":"ImageObject","url":"${s.fields.publisherLogo||"{{LOGO_URL}}"}"}}\n    }`);
+    if (s.id==="breadcrumb") parts.push(`    {\n      "@type": "BreadcrumbList",\n      "itemListElement": [\n        {"@type":"ListItem","position":1,"name":"Home","item":"{{SITE_URL}}"},\n        {"@type":"ListItem","position":2,"name":"{{CATEGORY}}","item":"{{CATEGORY_URL}}"},\n        {"@type":"ListItem","position":3,"name":"{{POST_TITLE}}","item":"{{POST_URL}}"}\n      ]\n    }`);
+    if (s.id==="organization") parts.push(`    {\n      "@type": "Organization",\n      "name": "${s.fields.orgName||"Brand"}",\n      "url": "${s.fields.website||"{{SITE_URL}}"}",\n      "logo": "{{LOGO_URL}}",\n      "sameAs": [${(s.fields.socialProfiles||"").split(",").map(x=>`"${x.trim()}"`).join(",")}]\n    }`);
+    if (s.id==="website") parts.push(`    {\n      "@type": "WebSite",\n      "name": "${s.fields.siteName||"{{SITE_NAME}}"}",\n      "url": "${s.fields.siteUrl||"{{SITE_URL}}"}",\n      "potentialAction": {"@type":"SearchAction","target":"${s.fields.siteUrl||"{{SITE_URL}}"}/?s={search_term_string}","query-input":"required name=search_term_string"}\n    }`);
+    if (s.id==="review") parts.push(`    {\n      "@type": "AggregateRating",\n      "ratingValue": "${s.fields.ratingValue||"5"}",\n      "reviewCount": "${s.fields.reviewCount||"1"}",\n      "bestRating": "5","worstRating": "1"\n    }`);
+    if (s.id==="localBusiness") parts.push(`    {\n      "@type": "LocalBusiness",\n      "name": "${s.fields.businessName||"Business"}",\n      "telephone": "${s.fields.phone||""}",\n      "address": {"@type":"PostalAddress","streetAddress":"${s.fields.address||""}","addressLocality":"${s.fields.city||""}","addressCountry":"${s.fields.country||"PK"}"}\n    }`);
+    if (s.id==="person") parts.push(`    {\n      "@type": "Person",\n      "name": "${s.fields.personName||"Author"}",\n      "jobTitle": "${s.fields.jobTitle||""}",\n      "url": "{{POST_URL}}",\n      "sameAs": [${(s.fields.sameAs||"").split(",").map(x=>`"${x.trim()}"`).join(",")}]\n    }`);
+    if (["faq","product","howTo","video","event"].includes(s.id)) {
+      const t={faq:"FAQPage",product:"Product",howTo:"HowTo",video:"VideoObject",event:"Event"}[s.id];
+      parts.push(`    {"@type":"${t}","name":"{{POST_TITLE}}","url":"{{POST_URL}}"}`);
+    }
+  });
+  return `<script type="application/ld+json">\n{\n  "@context": "https://schema.org",\n  "@graph": [\n${parts.join(",\n")}\n  ]\n}\n<\/script>`;
+}
+
+const WP_CODE = `<?php
+/**
+ * Plugin Name: Auto Schema Markup Pro
+ * Description: Auto JSON-LD schema on every post/page
+ * Version: 2.0
+ */
+if (!defined('ABSPATH')) exit;
+
+function asm_inject() {
+  if (!is_singular()) return;
+  $graph = [
+    ['@type'=>'Article','headline'=>get_the_title(),
+     'description'=>get_the_excerpt(),'url'=>get_permalink(),
+     'datePublished'=>get_the_date('c'),'dateModified'=>get_the_modified_date('c'),
+     'image'=>get_the_post_thumbnail_url(null,'full'),
+     'author'=>['@type'=>'Person','name'=>get_the_author()],
+     'publisher'=>['@type'=>'Organization','name'=>get_bloginfo('name'),
+       'logo'=>['@type'=>'ImageObject','url'=>get_site_icon_url()]]],
+    ['@type'=>'BreadcrumbList','itemListElement'=>[
+      ['@type'=>'ListItem','position'=>1,'name'=>'Home','item'=>home_url()],
+      ['@type'=>'ListItem','position'=>2,'name'=>get_the_title(),'item'=>get_permalink()]]],
+    ['@type'=>'Organization','name'=>get_bloginfo('name'),
+     'url'=>home_url(),'logo'=>get_site_icon_url()],
+    ['@type'=>'WebSite','name'=>get_bloginfo('name'),'url'=>home_url(),
+     'potentialAction'=>['@type'=>'SearchAction',
+       'target'=>home_url().'/?s={search_term_string}',
+       'query-input'=>'required name=search_term_string']],
+  ];
+  echo '<script type="application/ld+json">'.wp_json_encode(
+    ['@context'=>'https://schema.org','@graph'=>$graph],
+    JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT).'</script>';
+}
+add_action('wp_head','asm_inject');`;
+
+const TABS = ["Clients","Dashboard","Code","WordPress","Settings","Setup"];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+export default function App() {
+  const [clients, setClients]             = useState([]);
+  const [activeId, setActiveId]           = useState(null);
+  const [tab, setTab]                     = useState("Clients");
+  const [expandedSchema, setExpandedSchema] = useState(null);
+  const [toast, setToast]                 = useState(null);
+  const [copied, setCopied]               = useState("");
+  const [loading, setLoading]             = useState(true);
+  const [saving, setSaving]               = useState(false);
+  const [dbStatus, setDbStatus]           = useState("checking"); // checking | ok | error | no-table
+  const [showAdd, setShowAdd]             = useState(false);
+  const [newName, setNewName]             = useState("");
+  const [newUrl, setNewUrl]               = useState("");
+  const [confirmDel, setConfirmDel]       = useState(null);
+  const [saveTimer, setSaveTimer]         = useState(null);
+
+  const showToast = (msg, color="#1e1b4b") => {
+    setToast({ msg, color });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  // ── Load from Supabase ──
+  useEffect(() => {
+    loadClients();
+  }, []);
+
+  const loadClients = async () => {
+    setLoading(true);
+    try {
+      const data = await sbSelect("schema_clients", "order=created_at.asc");
+      const parsed = data.map(r => ({
+        ...r,
+        schemas: r.schemas && typeof r.schemas === "object" ? r.schemas : defaultSchemas(),
+        settings: r.settings && typeof r.settings === "object" ? r.settings : defaultSettings(),
+      }));
+      setClients(parsed);
+      if (parsed.length > 0 && !activeId) setActiveId(parsed[0].id);
+      setDbStatus("ok");
+    } catch (err) {
+      const msg = err.message || "";
+      if (msg.includes("relation") || msg.includes("does not exist") || msg.includes("42P01")) {
+        setDbStatus("no-table");
+      } else {
+        setDbStatus("error");
+      }
+    }
+    setLoading(false);
+  };
+
+  // ── Auto-save with debounce ──
+  const saveClient = useCallback(async (client) => {
+    if (!client) return;
+    setSaving(true);
+    try {
+      await sbUpsert("schema_clients", {
+        id: client.id,
+        name: client.name,
+        url: client.url,
+        created_at: client.created_at,
+        global_enabled: client.global_enabled,
+        schemas: client.schemas,
+        settings: client.settings,
+      });
+    } catch (e) {
+      showToast("❌ Save error: " + e.message, "#7f1d1d");
+    }
+    setSaving(false);
+  }, []);
+
+  const debouncedSave = useCallback((client) => {
+    if (saveTimer) clearTimeout(saveTimer);
+    const t = setTimeout(() => saveClient(client), 800);
+    setSaveTimer(t);
+  }, [saveTimer, saveClient]);
+
+  const activeClient = clients.find(c => c.id === activeId);
+
+  // ── Mutate helpers ──
+  const mutateClient = (id, fn) => {
+    let updated;
+    setClients(cs => cs.map(c => {
+      if (c.id !== id) return c;
+      updated = fn(c);
+      return updated;
+    }));
+    setTimeout(() => {
+      setClients(cs => {
+        const c = cs.find(x => x.id === id);
+        if (c) debouncedSave(c);
+        return cs;
+      });
+    }, 50);
+  };
+
+  const toggleSchema = (schemaId) => {
+    mutateClient(activeId, c => ({
+      ...c, schemas: { ...c.schemas, [schemaId]: { ...c.schemas[schemaId], enabled: !c.schemas[schemaId].enabled }}
+    }));
+  };
+  const updateField = (schemaId, key, val) => {
+    mutateClient(activeId, c => ({
+      ...c, schemas: { ...c.schemas, [schemaId]: { ...c.schemas[schemaId], fields: { ...c.schemas[schemaId].fields, [key]: val }}}
+    }));
+  };
+  const updateSettings = (fn) => {
+    mutateClient(activeId, c => ({ ...c, settings: fn(c.settings) }));
+  };
+  const setGlobal = (val) => {
+    mutateClient(activeId, c => ({ ...c, global_enabled: val }));
+  };
+
+  // ── Add Client ──
+  const addClient = async () => {
+    if (!newName.trim()) return;
+    const c = makeClient(newName.trim(), newUrl.trim());
+    try {
+      await sbUpsert("schema_clients", {
+        id: c.id, name: c.name, url: c.url, created_at: c.created_at,
+        global_enabled: c.global_enabled, schemas: c.schemas, settings: c.settings,
+      });
+      setClients(cs => [...cs, c]);
+      setActiveId(c.id);
+      setNewName(""); setNewUrl("");
+      setShowAdd(false);
+      setTab("Dashboard");
+      showToast(`✅ "${c.name}" saved to Supabase!`, "#064e3b");
+    } catch (e) {
+      showToast("❌ Error: " + e.message, "#7f1d1d");
+    }
+  };
+
+  // ── Delete Client ──
+  const deleteClient = async (id) => {
+    try {
+      await sbDelete("schema_clients", `id=eq.${id}`);
+      setClients(cs => cs.filter(c => c.id !== id));
+      if (activeId === id) setActiveId(clients.find(c=>c.id!==id)?.id || null);
+      setConfirmDel(null);
+      showToast("Client deleted from database", "#7f1d1d");
+    } catch (e) {
+      showToast("❌ Delete error: " + e.message, "#7f1d1d");
+    }
+  };
+
+  const copyText = (text, key) => {
+    navigator.clipboard.writeText(text);
+    setCopied(key);
+    showToast("📋 Code copied!");
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  const enabledCount = activeClient ? Object.values(activeClient.schemas).filter(s=>s.enabled).length : 0;
+  const generatedCode = activeClient ? generateCode(activeClient.schemas) : "";
+
+  // ══════════════════════════════════════ RENDER ══════════════════════════════
+  return (
+    <div style={{ fontFamily:"'DM Sans',sans-serif", background:"linear-gradient(135deg,#f8faff,#f3f0ff 50%,#f0fdf9)", minHeight:"100vh" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        .ts{position:relative;display:inline-block;width:44px;height:24px}
+        .ts input{opacity:0;width:0;height:0}
+        .tsl{position:absolute;cursor:pointer;inset:0;background:#e5e7eb;border-radius:24px;transition:.3s}
+        .tsl:before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;background:white;border-radius:50%;transition:.3s;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+        input:checked+.tsl{background:linear-gradient(135deg,#7c3aed,#6366f1)}
+        input:checked+.tsl:before{transform:translateX(20px)}
+        .card{background:rgba(255,255,255,.88);border:1.5px solid rgba(124,58,237,.14);border-radius:16px;backdrop-filter:blur(8px);transition:all .25s}
+        .card:hover{box-shadow:0 8px 28px rgba(124,58,237,.1);border-color:rgba(124,58,237,.28)}
+        .card.on{border-color:rgba(124,58,237,.38);background:rgba(124,58,237,.04)}
+        .btn{padding:9px 20px;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:13.5px;font-weight:600;cursor:pointer;transition:all .2s}
+        .btn-p{background:linear-gradient(135deg,#7c3aed,#6366f1);color:white}
+        .btn-p:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(124,58,237,.35)}
+        .btn-g{background:linear-gradient(135deg,#059669,#10b981);color:white}
+        .btn-g:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(5,150,105,.3)}
+        .btn-ghost{background:rgba(124,58,237,.08);color:#7c3aed;border:1.5px solid rgba(124,58,237,.2)}
+        .btn-ghost:hover{background:rgba(124,58,237,.15)}
+        .btn-r{background:rgba(220,38,38,.08);color:#dc2626;border:1.5px solid rgba(220,38,38,.2)}
+        .btn-r:hover{background:rgba(220,38,38,.15)}
+        .tab{padding:8px 18px;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s;background:transparent;color:#6b7280}
+        .tab.a{background:white;color:#1e1b4b;font-weight:700;box-shadow:0 2px 12px rgba(124,58,237,.14)}
+        .inp{width:100%;padding:9px 13px;border:1.5px solid rgba(124,58,237,.2);border-radius:9px;font-family:'DM Sans',sans-serif;font-size:13px;color:#1e1b4b;background:rgba(255,255,255,.9);outline:none;transition:border .2s}
+        .inp:focus{border-color:#7c3aed}
+        .code{background:#150d2e;color:#ddd6fe;border-radius:14px;padding:20px;font-family:'Fira Code','Courier New',monospace;font-size:11.5px;line-height:1.75;overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto}
+        .pill{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:700}
+        .badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:8px;font-size:11px;font-weight:700}
+        .client-row{display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(255,255,255,.85);border:1.5px solid rgba(124,58,237,.13);border-radius:14px;transition:all .2s;cursor:pointer}
+        .client-row:hover{border-color:rgba(124,58,237,.3);box-shadow:0 4px 16px rgba(124,58,237,.1)}
+        .client-row.ac{border-color:rgba(124,58,237,.5);background:rgba(124,58,237,.06)}
+        .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+        .modal{background:white;border-radius:20px;padding:28px;width:400px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+        .spin{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.4);border-top-color:white;border-radius:50%;animation:spin .7s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+        .fade{animation:fadeIn .25s ease}
+        .pulse{animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+      `}</style>
+
+      {/* ── HEADER ── */}
+      <div style={{ background:"linear-gradient(135deg,#3b0764 0%,#7c3aed 55%,#4338ca 100%)", padding:"26px 32px 22px", position:"relative", overflow:"hidden" }}>
+        <div style={{ position:"absolute", top:-40, right:-40, width:200, height:200, background:"rgba(255,255,255,.04)", borderRadius:"50%" }} />
+        <div style={{ position:"relative", zIndex:1, display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+          <div>
+            <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10 }}>
+              <span style={{ fontSize:32 }}>🧩</span>
+              <div>
+                <h1 style={{ fontFamily:"'Syne',sans-serif", fontSize:23, fontWeight:800, color:"white", letterSpacing:"-0.5px" }}>Schema Markup Manager</h1>
+                <p style={{ color:"rgba(255,255,255,.7)", fontSize:13, marginTop:1 }}>Multi-client • Supabase • Cross-device Permanent Save</p>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {[
+                { t:`${clients.length} Clients`, bg:"#6ee7b7", c:"#064e3b" },
+                { t:"Supabase Connected", bg:"#fcd34d", c:"#78350f" },
+                { t:"Any Device = Same Data", bg:"#c4b5fd", c:"#3b0764" },
+              ].map(p => <span key={p.t} className="pill" style={{ background:p.bg, color:p.c }}>✓ {p.t}</span>)}
+            </div>
+          </div>
+          {/* DB Status */}
+          <div style={{ background:"rgba(255,255,255,.12)", borderRadius:12, padding:"10px 16px", textAlign:"right", backdropFilter:"blur(8px)" }}>
+            <div style={{ fontSize:11, color:"rgba(255,255,255,.7)", marginBottom:3 }}>DATABASE</div>
+            <div style={{ display:"flex", alignItems:"center", gap:6, justifyContent:"flex-end" }}>
+              <div style={{ width:8, height:8, borderRadius:"50%", background: dbStatus==="ok"?"#6ee7b7": dbStatus==="checking"?"#fcd34d":"#fca5a5", boxShadow:`0 0 8px ${dbStatus==="ok"?"#6ee7b7":dbStatus==="checking"?"#fcd34d":"#fca5a5"}` }} className={dbStatus==="checking"?"pulse":""} />
+              <span style={{ fontSize:13, fontWeight:700, color:"white" }}>
+                {dbStatus==="ok"?"Supabase ✅": dbStatus==="checking"?"Connecting...": dbStatus==="no-table"?"Table Missing ⚠️":"Error ❌"}
+              </span>
+            </div>
+            {saving && <div style={{ fontSize:11, color:"rgba(255,255,255,.7)", marginTop:2 }}>💾 Saving...</div>}
+          </div>
+        </div>
+      </div>
+
+      {/* ── TABS ── */}
+      <div style={{ background:"rgba(255,255,255,.75)", backdropFilter:"blur(10px)", padding:"10px 28px", borderBottom:"1px solid rgba(124,58,237,.1)", display:"flex", gap:4, alignItems:"center", flexWrap:"wrap" }}>
+        {TABS.map(t => <button key={t} className={`tab ${tab===t?"a":""}`} onClick={()=>setTab(t)}>{t==="Setup"?"⚙️ Setup":t}</button>)}
+        {activeClient && (
+          <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ fontSize:12, color:"#6b7280" }}>Client:</span>
+            <span className="badge" style={{ background:"rgba(124,58,237,.12)", color:"#7c3aed" }}>👤 {activeClient.name}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ── BODY ── */}
+      <div style={{ padding:"24px 32px", maxWidth:1000, margin:"0 auto" }}>
+
+        {/* ══ SETUP TAB ══ */}
+        {tab==="Setup" && (
+          <div className="fade">
+            <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:18, fontWeight:800, color:"#1e1b4b", marginBottom:6 }}>⚙️ Supabase Table Setup</h2>
+            <p style={{ fontSize:13, color:"#6b7280", marginBottom:20 }}>Ek baar ye SQL run karna hoga Supabase SQL Editor mein — phir sab kuch automatic hai</p>
+
+            <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>
+              <div style={{ flex:1, minWidth:200, background: dbStatus==="ok"?"rgba(5,150,105,.08)":"rgba(239,68,68,.08)", border:`1.5px solid ${dbStatus==="ok"?"rgba(5,150,105,.3)":"rgba(239,68,68,.3)"}`, borderRadius:12, padding:"14px 18px" }}>
+                <div style={{ fontWeight:700, fontSize:14, color: dbStatus==="ok"?"#059669":"#dc2626" }}>
+                  {dbStatus==="ok"?"✅ Table Ready — Connected!" : dbStatus==="no-table"?"❌ Table Nahi Mili — SQL Run Karo" : dbStatus==="checking"?"⏳ Checking...":"❌ Connection Error"}
+                </div>
+                <div style={{ fontSize:12, color:"#6b7280", marginTop:4 }}>
+                  {dbStatus==="ok" ? `${clients.length} clients database mein hain` : "Neeche SQL copy karo aur Supabase mein run karo"}
+                </div>
+              </div>
+              <button className="btn btn-ghost" onClick={loadClients} style={{ alignSelf:"center" }}>🔄 Retry Connection</button>
+            </div>
+
+            <div style={{ marginBottom:12, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <h3 style={{ fontWeight:700, fontSize:15, color:"#1e1b4b" }}>📋 SQL — Supabase SQL Editor mein paste karo:</h3>
+              <button className="btn btn-p" style={{ padding:"7px 16px", fontSize:12 }} onClick={() => copyText(SETUP_SQL, "sql")}>
+                {copied==="sql"?"✅ Copied!":"📋 Copy SQL"}
+              </button>
+            </div>
+            <div className="code">{SETUP_SQL}</div>
+
+            <div style={{ marginTop:20 }}>
+              <h3 style={{ fontWeight:700, fontSize:15, color:"#1e1b4b", marginBottom:12 }}>📖 Step by Step:</h3>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:10 }}>
+                {[
+                  { n:"1️⃣ SQL Copy Karo", d:"Upar se SQL code copy karo" },
+                  { n:"2️⃣ Supabase Open Karo", d:"supabase.com → apna project" },
+                  { n:"3️⃣ SQL Editor", d:"Left sidebar → SQL Editor" },
+                  { n:"4️⃣ Paste & Run", d:"SQL paste karo → Run button" },
+                  { n:"5️⃣ Retry Karo", d:"Upar 'Retry Connection' click karo" },
+                  { n:"6️⃣ Done!", d:"Clients tab mein jao aur shuru karo" },
+                ].map(s => (
+                  <div key={s.n} className="card" style={{ padding:"14px 16px" }}>
+                    <div style={{ fontSize:20, marginBottom:5 }}>{s.n.split(" ")[0]}</div>
+                    <div style={{ fontWeight:700, fontSize:13, color:"#1e1b4b" }}>{s.n.replace(/^\S+\s/,"")}</div>
+                    <div style={{ fontSize:12, color:"#6b7280", marginTop:3 }}>{s.d}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ CLIENTS TAB ══ */}
+        {tab==="Clients" && (
+          <div className="fade">
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 }}>
+              <div>
+                <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:19, fontWeight:800, color:"#1e1b4b" }}>👥 Client Manager</h2>
+                <p style={{ fontSize:13, color:"#6b7280", marginTop:3 }}>Har client ka data Supabase mein permanently save — koi bhi device open karo, same data milega</p>
+              </div>
+              <button className="btn btn-p" onClick={() => setShowAdd(true)} disabled={dbStatus!=="ok"}>+ Add Client</button>
+            </div>
+
+            {dbStatus==="no-table" && (
+              <div style={{ background:"rgba(239,68,68,.08)", border:"1.5px solid rgba(239,68,68,.25)", borderRadius:14, padding:"16px 20px", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <div>
+                  <div style={{ fontWeight:700, color:"#dc2626", fontSize:14 }}>⚠️ Database table nahi mili</div>
+                  <div style={{ fontSize:13, color:"#6b7280", marginTop:3 }}>Pehle Setup tab mein jao aur SQL run karo</div>
+                </div>
+                <button className="btn btn-r" style={{ padding:"7px 16px", fontSize:12 }} onClick={() => setTab("Setup")}>Go to Setup →</button>
+              </div>
+            )}
+
+            {loading ? (
+              <div style={{ textAlign:"center", padding:"60px 20px" }}>
+                <div className="spin" style={{ width:32, height:32, borderWidth:3, borderColor:"rgba(124,58,237,.3)", borderTopColor:"#7c3aed", display:"inline-block", borderRadius:"50%" }} />
+                <p style={{ color:"#6b7280", marginTop:12 }}>Supabase se data load ho raha hai...</p>
+              </div>
+            ) : clients.length===0 ? (
+              <div style={{ textAlign:"center", padding:"60px 20px", background:"rgba(255,255,255,.7)", borderRadius:20, border:"2px dashed rgba(124,58,237,.2)" }}>
+                <div style={{ fontSize:48, marginBottom:12 }}>🏁</div>
+                <h3 style={{ fontFamily:"'Syne',sans-serif", fontSize:17, color:"#1e1b4b", marginBottom:6 }}>Koi client nahi abhi</h3>
+                <p style={{ color:"#6b7280", fontSize:13, marginBottom:20 }}>Pehla client add karo — Supabase mein permanent save hoga</p>
+                <button className="btn btn-p" onClick={() => setShowAdd(true)} disabled={dbStatus!=="ok"}>+ Pehla Client Add Karo</button>
+              </div>
+            ) : (
+              <div style={{ display:"grid", gap:10 }}>
+                {clients.map(c => {
+                  const ena = Object.values(c.schemas||{}).filter(s=>s.enabled).length;
+                  return (
+                    <div key={c.id} className={`client-row ${activeId===c.id?"ac":""}`} onClick={() => { setActiveId(c.id); setTab("Dashboard"); }}>
+                      <div style={{ width:44, height:44, borderRadius:12, background:"linear-gradient(135deg,#7c3aed,#6366f1)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, fontWeight:800, color:"white", flexShrink:0 }}>
+                        {c.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontWeight:700, fontSize:15, color:"#1e1b4b" }}>{c.name}</div>
+                        <div style={{ fontSize:12, color:"#6b7280", marginTop:2 }}>{c.url} • {c.created_at}</div>
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                        <span className="badge" style={{ background:"rgba(5,150,105,.1)", color:"#059669" }}>{ena} schemas</span>
+                        <span className="badge" style={{ background:c.global_enabled?"rgba(5,150,105,.1)":"rgba(156,163,175,.15)", color:c.global_enabled?"#059669":"#9ca3af" }}>
+                          {c.global_enabled?"● ON":"○ OFF"}
+                        </span>
+                        <button className="btn btn-ghost" style={{ padding:"6px 12px", fontSize:12 }}
+                          onClick={e=>{ e.stopPropagation(); setActiveId(c.id); setTab("Dashboard"); }}>Open →</button>
+                        <button className="btn btn-r" style={{ padding:"6px 10px", fontSize:12 }}
+                          onClick={e=>{ e.stopPropagation(); setConfirmDel(c.id); }}>🗑</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div style={{ marginTop:18, padding:"13px 18px", background:"rgba(5,150,105,.07)", border:"1.5px solid rgba(5,150,105,.2)", borderRadius:12 }}>
+              <p style={{ fontSize:13, color:"#065f46", fontWeight:500 }}>
+                🌍 <strong>Cross-Device:</strong> Phone, laptop, tablet — koi bhi device par kholo, Supabase se same data milega. Internet connection chahiye.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ══ DASHBOARD TAB ══ */}
+        {tab==="Dashboard" && (
+          <>
+            {!activeClient ? (
+              <div style={{ textAlign:"center", padding:"60px" }}>
+                <div style={{ fontSize:48 }}>👈</div>
+                <p style={{ color:"#6b7280", marginTop:12, fontSize:15 }}>Clients tab se koi client select karo</p>
+                <button className="btn btn-p" style={{ marginTop:16 }} onClick={() => setTab("Clients")}>Go to Clients</button>
+              </div>
+            ) : (
+              <div className="fade">
+                <div style={{ background:"linear-gradient(135deg,rgba(124,58,237,.08),rgba(99,102,241,.05))", border:"2px solid rgba(124,58,237,.18)", borderRadius:18, padding:"18px 22px", display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+                  <div>
+                    <div style={{ fontFamily:"'Syne',sans-serif", fontSize:16, fontWeight:800, color:"#1e1b4b" }}>🔌 Auto Schema — {activeClient.name}</div>
+                    <div style={{ fontSize:13, color:"#6b7280", marginTop:3 }}>{activeClient.global_enabled?"✅ Active — har post par schema inject ho raha hai":"❌ Disabled — koi schema apply nahi ho raha"}</div>
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontSize:13, fontWeight:700, color:activeClient.global_enabled?"#059669":"#9ca3af" }}>{activeClient.global_enabled?"ON":"OFF"}</span>
+                    <label className="ts"><input type="checkbox" checked={activeClient.global_enabled} onChange={() => setGlobal(!activeClient.global_enabled)} /><span className="tsl"/></label>
+                  </div>
+                </div>
+
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                  <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:17, fontWeight:800, color:"#1e1b4b" }}>📦 Schema Types — {enabledCount} Active</h2>
+                  <span style={{ fontSize:12, color:"#6b7280" }}>{saving?"💾 Saving to Supabase...":"✅ Auto-saved to Supabase"}</span>
+                </div>
+
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:12 }}>
+                  {Object.values(activeClient.schemas).map(schema => (
+                    <div key={schema.id} className={`card ${schema.enabled?"on":""}`} style={{ padding:"16px 18px" }}>
+                      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:8 }}>
+                        <div style={{ display:"flex", gap:10 }}>
+                          <span style={{ fontSize:22 }}>{schema.icon}</span>
+                          <div>
+                            <div style={{ fontWeight:700, fontSize:13.5, color:"#1e1b4b" }}>{schema.label}</div>
+                            <div style={{ fontSize:11.5, color:"#6b7280", marginTop:2, lineHeight:1.5 }}>{schema.description}</div>
+                          </div>
+                        </div>
+                        <label className="ts" style={{ flexShrink:0 }}>
+                          <input type="checkbox" checked={schema.enabled} onChange={() => toggleSchema(schema.id)} />
+                          <span className="tsl"/>
+                        </label>
+                      </div>
+                      {schema.enabled && Object.keys(schema.fields).length>0 && (
+                        <>
+                          <button onClick={() => setExpandedSchema(expandedSchema===schema.id?null:schema.id)}
+                            style={{ marginTop:10, background:"rgba(124,58,237,.1)", border:"none", borderRadius:7, padding:"4px 11px", fontSize:11.5, color:"#7c3aed", cursor:"pointer", fontWeight:700 }}>
+                            {expandedSchema===schema.id?"▲ Hide":"⚙️ Configure"}
+                          </button>
+                          {expandedSchema===schema.id && (
+                            <div style={{ marginTop:12, paddingTop:12, borderTop:"1px solid rgba(124,58,237,.1)" }}>
+                              {Object.entries(schema.fields).map(([k,v]) => (
+                                <div key={k} style={{ marginBottom:8 }}>
+                                  <label style={{ fontSize:11, fontWeight:700, color:"#6b7280", display:"block", marginBottom:3, textTransform:"capitalize" }}>{k.replace(/([A-Z])/g," $1")}</label>
+                                  <input className="inp" value={v} onChange={e => updateField(schema.id,k,e.target.value)} placeholder={k} />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ══ CODE TAB ══ */}
+        {tab==="Code" && (
+          <div className="fade">
+            {!activeClient ? <p style={{ color:"#6b7280", padding:"40px", textAlign:"center" }}>Pehle client select karo</p> : (
+              <>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                  <div>
+                    <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:17, fontWeight:800, color:"#1e1b4b" }}>📄 Generated Schema Code</h2>
+                    <p style={{ fontSize:13, color:"#6b7280", marginTop:3 }}>Site ke &lt;head&gt; mein paste karo — ek baar sab pages par lagega</p>
+                  </div>
+                  <button className="btn btn-p" onClick={() => copyText(generatedCode,"code")}>{copied==="code"?"✅ Copied!":"📋 Copy Code"}</button>
+                </div>
+                <div className="code">{generatedCode}</div>
+                <h3 style={{ fontFamily:"'Syne',sans-serif", fontSize:15, fontWeight:800, color:"#1e1b4b", margin:"20px 0 12px" }}>🌍 Platform Guide</h3>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(195px,1fr))", gap:10 }}>
+                  {[
+                    { p:"WordPress", i:"🔵", w:"WordPress tab ka PHP plugin use karo" },
+                    { p:"Blogger", i:"🟠", w:"Theme → Edit HTML → &lt;head&gt; ke baad" },
+                    { p:"Webflow", i:"🟣", w:"Pages → Settings → Custom Code → Head" },
+                    { p:"Shopify", i:"🟢", w:"Themes → Edit Code → theme.liquid" },
+                    { p:"Wix", i:"🔴", w:"Settings → Advanced → Custom Code → Head" },
+                    { p:"Custom HTML", i:"⚪", w:"Har page ke &lt;head&gt; mein paste karo" },
+                  ].map(x => (
+                    <div key={x.p} className="card" style={{ padding:"13px 15px" }}>
+                      <div style={{ fontSize:18, marginBottom:5 }}>{x.i}</div>
+                      <div style={{ fontWeight:700, fontSize:13, color:"#1e1b4b" }}>{x.p}</div>
+                      <div style={{ fontSize:11.5, color:"#6b7280", marginTop:3, lineHeight:1.5 }} dangerouslySetInnerHTML={{__html:x.w}} />
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ══ WORDPRESS TAB ══ */}
+        {tab==="WordPress" && (
+          <div className="fade">
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+              <div>
+                <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:17, fontWeight:800, color:"#1e1b4b" }}>🔌 WordPress Auto Plugin</h2>
+                <p style={{ fontSize:13, color:"#6b7280", marginTop:3 }}>Upload karo activate karo — automatically har post par lagega</p>
+              </div>
+              <button className="btn btn-p" onClick={() => copyText(WP_CODE,"wp")}>{copied==="wp"?"✅ Copied!":"📋 Copy Plugin"}</button>
+            </div>
+            <div className="code">{WP_CODE}</div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:10, marginTop:16 }}>
+              {[
+                { n:"1️⃣ Copy Karo", d:"Plugin PHP code copy karo" },
+                { n:"2️⃣ File Banao", d:"auto-schema.php naam di file" },
+                { n:"3️⃣ Upload Karo", d:"/wp-content/plugins/ mein upload" },
+                { n:"4️⃣ Activate Karo", d:"WP Admin → Plugins → Activate" },
+              ].map(s => (
+                <div key={s.n} className="card" style={{ padding:"14px 16px", display:"flex", gap:10 }}>
+                  <span style={{ fontSize:20 }}>{s.n.split(" ")[0]}</span>
+                  <div>
+                    <div style={{ fontWeight:700, fontSize:13, color:"#1e1b4b" }}>{s.n.replace(/^\S+\s/,"")}</div>
+                    <div style={{ fontSize:12, color:"#6b7280", marginTop:2 }}>{s.d}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ══ SETTINGS TAB ══ */}
+        {tab==="Settings" && (
+          <div className="fade">
+            {!activeClient ? <p style={{ color:"#6b7280", padding:"40px", textAlign:"center" }}>Pehle client select karo</p> : (
+              <>
+                <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:17, fontWeight:800, color:"#1e1b4b", marginBottom:16 }}>⚙️ Settings — {activeClient.name}</h2>
+                <div style={{ display:"grid", gap:12 }}>
+                  <div className="card" style={{ padding:"18px 22px" }}>
+                    <h3 style={{ fontWeight:700, fontSize:14, color:"#1e1b4b", marginBottom:4 }}>📄 Schema Apply Karo In Par</h3>
+                    <p style={{ fontSize:12, color:"#6b7280", marginBottom:12 }}>Konse content types mein schema inject ho</p>
+                    <div style={{ display:"flex", gap:20, flexWrap:"wrap" }}>
+                      {Object.entries(activeClient.settings.postTypes).map(([t,v]) => (
+                        <label key={t} style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:14, fontWeight:600, color:"#1e1b4b", textTransform:"capitalize" }}>
+                          <input type="checkbox" style={{ width:15, height:15, accentColor:"#7c3aed", cursor:"pointer" }} checked={v}
+                            onChange={() => updateSettings(s=>({...s,postTypes:{...s.postTypes,[t]:!v}}))} />
+                          {t}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  {[
+                    { key:"autoApply", title:"⚡ Auto-Inject on Publish", desc:"Post publish hote hi schema automatically add ho" },
+                    { key:"debugMode", title:"🐛 Debug Mode", desc:"Browser console mein schema output dekho" },
+                  ].map(opt => (
+                    <div key={opt.key} className="card" style={{ padding:"16px 22px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <div>
+                        <h3 style={{ fontWeight:700, fontSize:14, color:"#1e1b4b" }}>{opt.title}</h3>
+                        <p style={{ fontSize:12, color:"#6b7280", marginTop:2 }}>{opt.desc}</p>
+                      </div>
+                      <label className="ts">
+                        <input type="checkbox" checked={activeClient.settings[opt.key]}
+                          onChange={() => updateSettings(s=>({...s,[opt.key]:!s[opt.key]}))} />
+                        <span className="tsl"/>
+                      </label>
+                    </div>
+                  ))}
+                  <div className="card" style={{ padding:"16px 22px" }}>
+                    <h3 style={{ fontWeight:700, fontSize:14, color:"#1e1b4b", marginBottom:4 }}>🚫 Excluded URLs</h3>
+                    <p style={{ fontSize:12, color:"#6b7280", marginBottom:8 }}>In pages par schema apply nahi hoga</p>
+                    <textarea className="inp" style={{ height:70, resize:"vertical" }}
+                      value={activeClient.settings.excludedUrls}
+                      onChange={e => updateSettings(s=>({...s,excludedUrls:e.target.value}))}
+                      placeholder="https://yoursite.com/contact, https://yoursite.com/privacy" />
+                  </div>
+                  <button className="btn btn-g" style={{ alignSelf:"flex-start", padding:"11px 26px" }}
+                    onClick={() => { saveClient(activeClient); showToast("✅ Settings Supabase mein save ho gaye!", "#064e3b"); }}>
+                    💾 Save to Supabase
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Add Client Modal ── */}
+      {showAdd && (
+        <div className="modal-bg" onClick={() => setShowAdd(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:20, fontWeight:800, color:"#1e1b4b", marginBottom:5 }}>➕ New Client Add Karo</h2>
+            <p style={{ fontSize:13, color:"#6b7280", marginBottom:18 }}>Data Supabase mein save hoga — har device par accessible</p>
+            <div style={{ marginBottom:13 }}>
+              <label style={{ fontSize:12, fontWeight:700, color:"#6b7280", display:"block", marginBottom:4 }}>CLIENT NAME *</label>
+              <input className="inp" placeholder="Ali's Blog / Khan's Shop" value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addClient()} autoFocus />
+            </div>
+            <div style={{ marginBottom:20 }}>
+              <label style={{ fontSize:12, fontWeight:700, color:"#6b7280", display:"block", marginBottom:4 }}>WEBSITE URL</label>
+              <input className="inp" placeholder="https://example.com" value={newUrl} onChange={e=>setNewUrl(e.target.value)} />
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button className="btn btn-g" style={{ flex:1 }} onClick={addClient}>✅ Save to Supabase</button>
+              <button className="btn btn-ghost" onClick={() => setShowAdd(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Confirm ── */}
+      {confirmDel && (
+        <div className="modal-bg" onClick={() => setConfirmDel(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()} style={{ textAlign:"center" }}>
+            <div style={{ fontSize:44, marginBottom:10 }}>⚠️</div>
+            <h2 style={{ fontFamily:"'Syne',sans-serif", fontSize:18, fontWeight:800, color:"#1e1b4b", marginBottom:8 }}>Client Delete Karo?</h2>
+            <p style={{ fontSize:13, color:"#6b7280", marginBottom:20 }}>Supabase se bhi permanently delete ho jayega</p>
+            <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+              <button className="btn btn-r" style={{ padding:"10px 24px" }} onClick={() => deleteClient(confirmDel)}>🗑 Delete Karo</button>
+              <button className="btn btn-ghost" onClick={() => setConfirmDel(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Toast ── */}
+      {toast && (
+        <div style={{ position:"fixed", bottom:24, right:24, background:toast.color, color:"white", padding:"12px 22px", borderRadius:12, fontSize:14, fontWeight:600, boxShadow:"0 8px 30px rgba(0,0,0,.2)", zIndex:999, animation:"fadeIn .3s ease" }}>
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
