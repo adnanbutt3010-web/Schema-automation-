@@ -47,15 +47,17 @@ const defaultSchemas = () => ({
   breadcrumb:    { id:"breadcrumb",    label:"Breadcrumb Navigation", icon:"🧭", enabled:true,  description:"Breadcrumb trail in Google SERPs", fields:{}},
   organization:  { id:"organization",  label:"Organization",          icon:"🌐", enabled:true,  description:"Brand + socials for Knowledge Panel", fields:{ orgName:"", website:"", socialProfiles:"" }},
   website:       { id:"website",       label:"WebSite + Sitelinks",   icon:"🔍", enabled:true,  description:"Sitelinks search box in Google", fields:{ siteName:"", siteUrl:"" }},
-  product:       { id:"product",       label:"Product Schema",        icon:"🛍️", enabled:false, description:"Price auto-extract from post title!", fields:{
+  product:       { id:"product",       label:"Product Schema",        icon:"🛍️", enabled:false, description:"Price + Rating — auto-extract from post title!", fields:{
     currency:"PKR",
     availability:"InStock",
     bloggerAutoPrice: true,
     priceFormat:"Rs.",
     pricePosition:"after_dash",
     brand:"",
+    showRating:true,
+    ratingValue:"4.8",
+    reviewCount:"120",
   }},
-  review:        { id:"review",        label:"Review / Rating",       icon:"⭐", enabled:false, description:"Star ratings in search results", fields:{ ratingValue:"4.8", reviewCount:"120" }},
   localBusiness: { id:"localBusiness", label:"Local Business",        icon:"🏢", enabled:false, description:"Maps, address, phone in SERPs", fields:{ businessName:"", phone:"", address:"", city:"", country:"PK" }},
   faq:           { id:"faq",           label:"FAQ Schema",            icon:"❓", enabled:false, description:"FAQ rich snippets for Q&A sections", fields:{}},
   howTo:         { id:"howTo",         label:"HowTo Schema",          icon:"📋", enabled:false, description:"Step-by-step rich results", fields:{}},
@@ -138,7 +140,14 @@ function generateBloggerPriceJS(productSchema) {
         "priceCurrency": "${cur}",
         "availability": "https://schema.org/${avail}",
         "url": url
-      }
+      }${f.showRating ? `,
+      "aggregateRating": {
+        "@type": "AggregateRating",
+        "ratingValue": "${f.ratingValue||"4.8"}",
+        "reviewCount": "${f.reviewCount||"1"}",
+        "bestRating": "5",
+        "worstRating": "1"
+      }` : ''}
     };
 
     var script = document.createElement('script');
@@ -171,7 +180,6 @@ function generateCode(schemas) {
     if (s.id==="breadcrumb") parts.push(`    {\n      "@type": "BreadcrumbList",\n      "itemListElement": [\n        {"@type":"ListItem","position":1,"name":"Home","item":"{{SITE_URL}}"},\n        {"@type":"ListItem","position":2,"name":"{{CATEGORY}}","item":"{{CATEGORY_URL}}"},\n        {"@type":"ListItem","position":3,"name":"{{POST_TITLE}}","item":"{{POST_URL}}"}\n      ]\n    }`);
     if (s.id==="organization") parts.push(`    {\n      "@type": "Organization",\n      "name": "${s.fields.orgName||"Brand"}",\n      "url": "${s.fields.website||"{{SITE_URL}}"}",\n      "logo": "{{LOGO_URL}}",\n      "sameAs": [${(s.fields.socialProfiles||"").split(",").map(x=>`"${x.trim()}"`).join(",")}]\n    }`);
     if (s.id==="website") parts.push(`    {\n      "@type": "WebSite",\n      "name": "${s.fields.siteName||"{{SITE_NAME}}"}",\n      "url": "${s.fields.siteUrl||"{{SITE_URL}}"}",\n      "potentialAction": {"@type":"SearchAction","target":"${s.fields.siteUrl||"{{SITE_URL}}"}/?q={search_term_string}","query-input":"required name=search_term_string"}\n    }`);
-    if (s.id==="review") parts.push(`    {\n      "@type": "AggregateRating",\n      "ratingValue": "${s.fields.ratingValue||"5"}",\n      "reviewCount": "${s.fields.reviewCount||"1"}",\n      "bestRating": "5","worstRating": "1"\n    }`);
     if (s.id==="localBusiness") parts.push(`    {\n      "@type": "LocalBusiness",\n      "name": "${s.fields.businessName||"Business"}",\n      "telephone": "${s.fields.phone||""}",\n      "address": {"@type":"PostalAddress","streetAddress":"${s.fields.address||""}","addressLocality":"${s.fields.city||""}","addressCountry":"${s.fields.country||"PK"}"}\n    }`);
     if (s.id==="person") parts.push(`    {\n      "@type": "Person",\n      "name": "${s.fields.personName||"Author"}",\n      "jobTitle": "${s.fields.jobTitle||""}",\n      "sameAs": [${(s.fields.sameAs||"").split(",").map(x=>`"${x.trim()}"`).join(",")}]\n    }`);
     if (["faq","howTo","video","event"].includes(s.id)) {
@@ -191,7 +199,8 @@ function generateCode(schemas) {
       output += `<!-- ✅ Blogger Auto Product Price Schema -->\n<!-- Yeh JavaScript title se price automatically detect karega -->\n`;
       output += generateBloggerPriceJS(productSchema);
     } else {
-      output += `<!-- ✅ Product Schema -->\n<script type="application/ld+json">\n{\n  "@context": "https://schema.org",\n  "@type": "Product",\n  "name": "{{PRODUCT_NAME}}",\n  "offers": {\n    "@type": "Offer",\n    "price": "{{PRICE}}",\n    "priceCurrency": "${productSchema.fields.currency||"PKR"}",\n    "availability": "https://schema.org/${productSchema.fields.availability||"InStock"}"\n  }\n}\n<\/script>`;
+      const r = productSchema.fields;
+      output += `<!-- ✅ Product Schema -->\n<!-- WordPress (WooCommerce) / Shopify: yeh values plugin/theme se khud-ba-khud (auto) bhar jate hain -->\n<script type="application/ld+json">\n{\n  "@context": "https://schema.org",\n  "@type": "Product",\n  "name": "{{PRODUCT_NAME}}",\n  "image": "{{PRODUCT_IMAGE}}",\n  "description": "{{PRODUCT_DESCRIPTION}}",\n  "url": "{{PRODUCT_URL}}",\n  "offers": {\n    "@type": "Offer",\n    "price": "{{PRODUCT_PRICE}}",\n    "priceCurrency": "${r.currency||"PKR"}",\n    "availability": "https://schema.org/${r.availability||"InStock"}",\n    "url": "{{PRODUCT_URL}}"\n  }${r.showRating ? `,\n  "aggregateRating": {\n    "@type": "AggregateRating",\n    "ratingValue": "${r.ratingValue||"4.8"}",\n    "reviewCount": "${r.reviewCount||"1"}",\n    "bestRating": "5",\n    "worstRating": "1"\n  }` : ''}\n}\n<\/script>`;
     }
   }
 
@@ -225,7 +234,40 @@ function asm_inject() {
        'target'=>home_url().'/?s={search_term_string}',
        'query-input'=>'required name=search_term_string']],
   ];
-  echo '<script type="application/ld+json">'.wp_json_encode(
+
+  // Product Schema (WooCommerce) — Price & Rating 100% Auto
+  if (function_exists('wc_get_product') && get_post_type() === 'product') {
+    $product = wc_get_product(get_the_ID());
+    if ($product) {
+      $product_schema = [
+        '@type' => 'Product',
+        'name' => $product->get_name(),
+        'image' => wp_get_attachment_url($product->get_image_id()),
+        'description' => wp_strip_all_tags($product->get_short_description() ?: $product->get_description()),
+        'sku' => $product->get_sku(),
+        'url' => get_permalink(),
+        'offers' => [
+          '@type' => 'Offer',
+          'price' => $product->get_price(),
+          'priceCurrency' => get_woocommerce_currency(),
+          'availability' => $product->is_in_stock()
+            ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+          'url' => get_permalink(),
+        ],
+      ];
+      if ($product->get_average_rating() > 0) {
+        $product_schema['aggregateRating'] = [
+          '@type' => 'AggregateRating',
+          'ratingValue' => $product->get_average_rating(),
+          'reviewCount' => $product->get_review_count(),
+          'bestRating' => '5',
+          'worstRating' => '1',
+        ];
+      }
+      $graph[] = $product_schema;
+    }
+  }
+
     ['@context'=>'https://schema.org','@graph'=>$graph],
     JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT).'<\/script>';
 }
@@ -625,6 +667,33 @@ export default function App() {
                                 <div style={{marginBottom:8}}>
                                   <label style={{fontSize:11,fontWeight:700,color:"#6b7280",display:"block",marginBottom:3}}>BRAND (Optional)</label>
                                   <input className="inp" value={schema.fields.brand||""} onChange={e=>updateField(schema.id,"brand",e.target.value)} placeholder="Brand name"/>
+                                </div>
+
+                                {/* Rating Box */}
+                                <div className="auto-price-box" style={{marginTop:14,borderColor:"rgba(245,158,11,.35)",background:"linear-gradient(135deg,rgba(245,158,11,.08),rgba(252,211,77,.05))"}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                                    <div>
+                                      <div style={{fontWeight:700,fontSize:13,color:"#92400e"}}>⭐ Show Rating with Product</div>
+                                      <div style={{fontSize:11,color:"#6b7280",marginTop:2}}>Stars Google search mein price ke saath dikhenge</div>
+                                    </div>
+                                    <label className="ts">
+                                      <input type="checkbox" checked={!!schema.fields.showRating}
+                                        onChange={e=>updateFieldBool(schema.id,"showRating",e.target.checked)}/>
+                                      <span className="tsl"/>
+                                    </label>
+                                  </div>
+                                  {schema.fields.showRating&&(
+                                    <div style={{display:"flex",gap:8}}>
+                                      <div style={{flex:1}}>
+                                        <label style={{fontSize:11,fontWeight:700,color:"#6b7280",display:"block",marginBottom:3}}>RATING (1-5)</label>
+                                        <input className="inp" value={schema.fields.ratingValue||"4.8"} onChange={e=>updateField(schema.id,"ratingValue",e.target.value)} placeholder="4.8"/>
+                                      </div>
+                                      <div style={{flex:1}}>
+                                        <label style={{fontSize:11,fontWeight:700,color:"#6b7280",display:"block",marginBottom:3}}>REVIEW COUNT</label>
+                                        <input className="inp" value={schema.fields.reviewCount||"120"} onChange={e=>updateField(schema.id,"reviewCount",e.target.value)} placeholder="120"/>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             )}
